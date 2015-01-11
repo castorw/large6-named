@@ -1,0 +1,28 @@
+{
+    "Configuration": {
+        "ServerHostname": "ip6ns.example.com",
+        "ServerAddress": "0.0.0.0",
+        "ServerPort": 53
+    },
+    "Prefixes": {
+        "fc00:ffff:ffff:acff::/64": {
+            "Version": 6,
+            "ReverseZone": true,
+            "ForwardZone": true,
+            "RecordPattern": "%r.ipv6.example.com",
+            "RecordTTL": 300,
+            "StartOfAuthority": {
+                "PrimaryNameServer": "ip6ns.example.com",
+                "AdminContact": "root.example.com",
+                "SerialNumber": 2015011101,
+                "RefreshTime": 86400,
+                "RetryTime": 7200,
+                "ExpireTime": 604800,
+                "MinimumTTL": 300
+            },
+            "NameServers": [
+                "ip6ns.example.com"
+            ]
+        }
+    }
+}

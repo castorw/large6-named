@@ -171,21 +171,21 @@ class Prefix():
         if len(re_match.groups()) != len(self.forward_zone_re_components):
             return False
 
-        prefix_start = self.ip_network.exploded.replace(":", "")[:self.ip_network.prefixlen / 4]
+        prefix_hex = self.ip_network.network_address.exploded.replace(":", "")
 
         recovered_data = dict()
 
         for ck, cv in enumerate(self.forward_zone_re_components):
             ra_ip = None
             if cv == "%f":
-                if not re_match.groups()[ck].lower().startswith(prefix_start):
+                ra = unicode(re_match.groups()[ck])
+                ra = ':'.join(ra[i:i + 4] for i in range(0, len(ra), 4))
+                ra_ip = ipaddress.ip_address(ra)
+                if not ra_ip in self.ip_network:
                     return False
-                else:
-                    ra = unicode(re_match.groups()[ck])
-                    ra = ':'.join(ra[i:i + 4] for i in range(0, len(ra), 4))
-                    ra_ip = ipaddress.ip_address(ra)
             elif cv == "%r":
-                ra = unicode(prefix_start + re_match.groups()[ck])
+                ra_hex = ("0" * (self.ip_network.prefixlen / 4)) + re_match.groups()[ck]
+                ra = unicode(hex(int(prefix_hex, 16) | int(ra_hex, 16))[2:])[:-1]
                 ra = ':'.join(ra[i:i + 4] for i in range(0, len(ra), 4))
                 ra_ip = ipaddress.ip_address(ra)
                 if not ra_ip in self.ip_network:

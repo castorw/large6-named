@@ -9,6 +9,7 @@
             "Version": 6,
             "ReverseZoneEnabled": true,
             "ForwardZoneEnabled": true,
+            "ForwardZoneName": "ipv6.example.com",
             "RecordPattern": "%r.ipv6.example.com",
             "RecordTTL": 300,
             "StartOfAuthority": {

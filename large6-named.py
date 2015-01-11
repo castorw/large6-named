@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import time
+import re
 
 __author__ = 'Lubomir Kaplan <castor@castor.sk>'
 
@@ -22,7 +23,7 @@ class PrefixException(NameServerException):
     pass
 
 
-class AddressNotCoveredException(PrefixException):
+class RecordNotCoveredException(PrefixException):
     pass
 
 
@@ -35,7 +36,6 @@ class RecordNotFoundException(HandlingException):
 
 
 class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
-
     def get_data(self):
         return self.request[0].strip()
 
@@ -51,12 +51,12 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
             request_name = request.q.qname
             request_type = request.q.qtype
             request_name_uc = unicode(request_name)
-            if request_name_uc.endswith(".ip6.arpa."):
+            if request_name_uc.endswith(".ip6.arpa.") and (request_type in (dnslib.QTYPE.SOA, dnslib.QTYPE.PTR)):
                 handler_logger.debug("%s requested reverse ipv6 %s: %s" % (self.client_address[0],
                                                                            dnslib.QTYPE[request_type],
                                                                            request_name_uc))
                 ipv6_uc = request_name_uc[:-9].replace(".", "")[::-1]
-                ipv6_uc = ':'.join(ipv6_uc[i:i+4] for i in range(0, len(ipv6_uc), 4))
+                ipv6_uc = ':'.join(ipv6_uc[i:i + 4] for i in range(0, len(ipv6_uc), 4))
                 ipv6_address = ipaddress.ip_address(ipv6_uc)
                 ns_result = None
                 for prefix in name_server.prefixes:
@@ -65,7 +65,7 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
                             ns_result = prefix.reverse_resolve(request_name, ipv6_address, request_type)
                     except PrefixException:
                         continue
-                    except AddressNotCoveredException:
+                    except RecordNotCoveredException:
                         continue
                 if ns_result is None:
                     raise RecordNotFoundException("no record found for %s" % request_name_uc)
@@ -75,7 +75,25 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
                 handler_logger.info("%s got response with %d records for ipv6 %s request: %s" % (
                     self.client_address[0], len(ns_result), dnslib.QTYPE[request_type], request_name_uc))
             else:
-                raise HandlingException("unsupported query for %s" % request_name_uc)
+                handler_logger.debug("%s requested forward resolution of %s: %s" % (self.client_address[0],
+                                                                                    dnslib.QTYPE[request_type],
+                                                                                    request_name_uc))
+                ns_result = None
+                for prefix in name_server.prefixes:
+                    try:
+                        if prefix.config["Version"] == 6:
+                            ns_result = prefix.forward_resolve(request_name, request_type)
+                    except PrefixException:
+                        continue
+                    except RecordNotCoveredException:
+                        continue
+                if ns_result is None:
+                    raise RecordNotFoundException("no record found for %s" % request_name_uc)
+                reply.header.set_rcode(dnslib.RCODE.NOERROR)
+                for rr in ns_result:
+                    reply.add_answer(rr)
+                handler_logger.info("%s got response with %d records for %s request: %s" % (
+                    self.client_address[0], len(ns_result), dnslib.QTYPE[request_type], request_name_uc))
         except RecordNotFoundException as e:
             handler_logger.info("%s %s" % (self.client_address[0], e.message))
             reply.header.set_rcode(dnslib.RCODE.NXDOMAIN)
@@ -101,7 +119,7 @@ class Prefix():
         self.ip_network = ipaddress.ip_network(prefix)
 
         if self.config["ReverseZoneEnabled"]:
-            zn_rev = self.ip_network.network_address.exploded.replace(":", "")[:self.ip_network.prefixlen/4][::-1]
+            zn_rev = self.ip_network.network_address.exploded.replace(":", "")[:self.ip_network.prefixlen / 4][::-1]
             zn = ".".join(zn_rev[::]) + ".ip6.arpa."
             self.reverse_zone_name = zn
             self.logger.debug("%s will get reverse zone %s" % (self.ip_network, self.reverse_zone_name))
@@ -128,17 +146,102 @@ class Prefix():
                                                                                   self.soa_record.times[0]))
 
         if self.config["ForwardZoneEnabled"]:
-            self.logger.warn("forward zone for prefix %s will not be created: not implemented yet" % self.ip_network)
-
+            hml4 = (self.ip_network.max_prefixlen - self.ip_network.prefixlen) / 4
+            mpl4 = self.ip_network.max_prefixlen / 4
+            forward_zone_re_base = self.config["RecordPattern"]
+            forward_zone_re_base = forward_zone_re_base.replace("%r",
+                                                                "([0-9a-fA-F]{" + str(hml4) + "," + str(hml4) + "})")
+            forward_zone_re_base = forward_zone_re_base.replace("%f",
+                                                                "([0-9a-fA-F]{" + str(mpl4) + "," + str(mpl4) + "})")
+            forward_zone_re_base = "^" + forward_zone_re_base.replace(".", "\\.") + "\.$"
+            self.forward_zone_re = re.compile(forward_zone_re_base)
+            self.forward_zone_re_components = re.findall(r"(%[a-z])", self.config["RecordPattern"])
+            self.logger.debug("forward lookup for prefix %s will use %d components in this order %s" % (
+                self.ip_network, len(self.forward_zone_re_components), ", ".join(self.forward_zone_re_components)))
+            self.logger.debug("compiled forward lookup expression %s for prefix %s" % (forward_zone_re_base,
+                                                                                       self.ip_network))
         pass
 
-    def reverse_resolve(self, request_name, ip_address, type):
+    def forward_match(self, request_name):
+        request_name = unicode(request_name).lower()
+        re_match = self.forward_zone_re.match(request_name.lower())
+        if not re_match:
+            return False
+
+        if len(re_match.groups()) != len(self.forward_zone_re_components):
+            return False
+
+        prefix_start = self.ip_network.exploded.replace(":", "")[:self.ip_network.prefixlen / 4]
+
+        recovered_data = dict()
+
+        for ck, cv in enumerate(self.forward_zone_re_components):
+            ra_ip = None
+            if cv == "%f":
+                if not re_match.groups()[ck].lower().startswith(prefix_start):
+                    return False
+                else:
+                    ra = unicode(re_match.groups()[ck])
+                    ra = ':'.join(ra[i:i + 4] for i in range(0, len(ra), 4))
+                    ra_ip = ipaddress.ip_address(ra)
+            elif cv == "%r":
+                ra = unicode(prefix_start + re_match.groups()[ck])
+                ra = ':'.join(ra[i:i + 4] for i in range(0, len(ra), 4))
+                ra_ip = ipaddress.ip_address(ra)
+                if not ra_ip in self.ip_network:
+                    return False
+            if ra_ip is not None and "full_ip_address" in recovered_data and ra_ip != recovered_data["full_ip_address"]:
+                return False
+            else:
+                recovered_data["full_ip_address"] = ra_ip
+
+        return recovered_data
+
+    def forward_resolve(self, request_name, request_type):
+        if not self.config["ForwardZoneEnabled"]:
+            raise PrefixException("prefix %s does not provide forward zone" % self.ip_network)
+        records = list()
+        if request_type == dnslib.QTYPE.SOA:
+            if request_name != self.config["ForwardZoneName"] and not self.forward_match(request_name):
+                raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
+                                                                                          self.ip_network))
+            records.append(dnslib.RR(rname=self.config["ForwardZoneName"], rtype=dnslib.QTYPE.SOA,
+                                     rclass=1, ttl=self.config["RecordTTL"],
+                                     rdata=self.soa_record))
+            for ns_record in self.ns_records:
+                records.append(dnslib.RR(rname=self.config["ForwardZoneName"], rtype=dnslib.QTYPE.NS,
+                                         rclass=1, ttl=self.config["RecordTTL"],
+                                         rdata=ns_record))
+            return records
+        elif request_type == dnslib.QTYPE.AAAA:
+            recovered_data = self.forward_match(request_name)
+
+            if not recovered_data:
+                raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
+                                                                                          self.ip_network))
+
+            if "full_ip_address" in recovered_data:
+                a4_data = recovered_data["full_ip_address"]
+            else:
+                raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
+                                                                                          self.ip_network))
+
+            self.logger.debug("%s resolved to %s" % (request_name, a4_data))
+            records = list()
+            records.append(dnslib.RR(rname=request_name, rtype=dnslib.QTYPE.AAAA,
+                                     rclass=1, ttl=self.config["RecordTTL"],
+                                     rdata=dnslib.AAAA(unicode(a4_data))))
+            return records
+        else:
+            raise PrefixException("unsupported record type %s" % dnslib.QTYPE[request_type])
+
+    def reverse_resolve(self, request_name, ip_address, request_type):
         if not self.config["ReverseZoneEnabled"]:
             raise PrefixException("prefix %s does not provide reverse zone" % self.ip_network)
         if not ip_address in self.ip_network:
-            raise AddressNotCoveredException("address %s is not within prefix %s" % (ip_address, self.ip_network))
+            raise RecordNotCoveredException("address %s is not within prefix %s" % (ip_address, self.ip_network))
         records = list()
-        if type == dnslib.QTYPE.SOA:
+        if request_type == dnslib.QTYPE.SOA:
             records.append(dnslib.RR(rname=self.reverse_zone_name, rtype=dnslib.QTYPE.SOA,
                                      rclass=1, ttl=self.config["RecordTTL"],
                                      rdata=self.soa_record))
@@ -147,8 +250,8 @@ class Prefix():
                                          rclass=1, ttl=self.config["RecordTTL"],
                                          rdata=ns_record))
             return records
-        elif type == dnslib.QTYPE.PTR:
-            remain_name = ip_address.exploded.replace(":", "")[self.ip_network.prefixlen/4:]
+        elif request_type == dnslib.QTYPE.PTR:
+            remain_name = ip_address.exploded.replace(":", "")[self.ip_network.prefixlen / 4:]
             full_name = ip_address.exploded.replace(":", "")
             ptr_data = self.config["RecordPattern"]
             ptr_data = ptr_data.replace("%r", remain_name)
@@ -160,11 +263,10 @@ class Prefix():
                                      rdata=dnslib.PTR(ptr_data)))
             return records
         else:
-            raise PrefixException("unsupported record type %s" % dnslib.QTYPE[type])
+            raise PrefixException("unsupported record type %s" % dnslib.QTYPE[request_type])
 
 
 class NameServer():
-
     def __init__(self):
         # load configuration
         self.config_file = open("large6-named.conf", "r")
@@ -231,6 +333,7 @@ class NameServer():
 def main():
     server = NameServer()
     server.start()
+
 
 if __name__ == '__main__':
     main()

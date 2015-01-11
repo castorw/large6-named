@@ -100,7 +100,7 @@ class Prefix():
             raise PrefixException("only ipv6 prefixes are currently supported")
         self.ip_network = ipaddress.ip_network(prefix)
 
-        if self.config["ReverseZone"]:
+        if self.config["ReverseZoneEnabled"]:
             zn_rev = self.ip_network.network_address.exploded.replace(":", "")[:self.ip_network.prefixlen/4][::-1]
             zn = ".".join(zn_rev[::]) + ".ip6.arpa."
             self.reverse_zone_name = zn
@@ -127,13 +127,13 @@ class Prefix():
                                                                                   self.ip_network,
                                                                                   self.soa_record.times[0]))
 
-        if self.config["ForwardZone"]:
+        if self.config["ForwardZoneEnabled"]:
             self.logger.warn("forward zone for prefix %s will not be created: not implemented yet" % self.ip_network)
 
         pass
 
     def reverse_resolve(self, request_name, ip_address, type):
-        if not self.config["ReverseZone"]:
+        if not self.config["ReverseZoneEnabled"]:
             raise PrefixException("prefix %s does not provide reverse zone" % self.ip_network)
         if not ip_address in self.ip_network:
             raise AddressNotCoveredException("address %s is not within prefix %s" % (ip_address, self.ip_network))

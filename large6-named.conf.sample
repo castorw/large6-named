@@ -7,8 +7,8 @@
     "Prefixes": {
         "fc00:ffff:ffff:acff::/64": {
             "Version": 6,
-            "ReverseZone": true,
-            "ForwardZone": true,
+            "ReverseZoneEnabled": true,
+            "ForwardZoneEnabled": true,
             "RecordPattern": "%r.ipv6.example.com",
             "RecordTTL": 300,
             "StartOfAuthority": {

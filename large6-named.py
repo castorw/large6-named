@@ -44,10 +44,11 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
 
     def handle(self):
         global handler_logger, name_server
+        request_raw = self.get_data()
+        request = dnslib.DNSRecord.parse(request_raw)
+        reply = dnslib.DNSRecord(dnslib.DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
+
         try:
-            request_raw = self.get_data()
-            request = dnslib.DNSRecord.parse(request_raw)
-            reply = dnslib.DNSRecord(dnslib.DNSHeader(id=request.header.id, qr=1, aa=1, ra=1), q=request.q)
             request_name = request.q.qname
             request_type = request.q.qtype
             request_name_uc = unicode(request_name)
@@ -64,8 +65,6 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
                         if prefix.config["Version"] == 6:
                             ns_result = prefix.reverse_resolve(request_name, ipv6_address, request_type)
                     except PrefixException:
-                        continue
-                    except RecordNotCoveredException:
                         continue
                 if ns_result is None:
                     raise RecordNotFoundException("no record found for %s" % request_name_uc)
@@ -84,8 +83,6 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
                         if prefix.config["Version"] == 6:
                             ns_result = prefix.forward_resolve(request_name, request_type)
                     except PrefixException:
-                        continue
-                    except RecordNotCoveredException:
                         continue
                 if ns_result is None:
                     raise RecordNotFoundException("no record found for %s" % request_name_uc)
@@ -118,8 +115,8 @@ class Prefix():
             raise PrefixException("only ipv6 prefixes are currently supported")
         try:
             self.ip_network = ipaddress.ip_network(prefix)
-        except ValueError as e:
-            raise PrefixException("invalid prefix %s: %s" % (prefix, e))
+        except ValueError as ent:
+            raise PrefixException("invalid prefix %s: %s" % (prefix, ent))
 
         if self.config["ReverseZoneEnabled"]:
             zn_rev = self.ip_network.network_address.exploded.replace(":", "")[:self.ip_network.prefixlen / 4][::-1]
@@ -151,8 +148,7 @@ class Prefix():
         if self.config["ForwardZoneEnabled"]:
             if not self.config["RecordPattern"].endswith(self.config["ForwardZoneName"]):
                 raise PrefixException("record pattern %s for prefix %s does not end with its forward zone name %s" % (
-                    self.config["RecordPattern"], self.ip_network, self.config["ForwardZoneName"]
-                                                                                                                     ))
+                    self.config["RecordPattern"], self.ip_network, self.config["ForwardZoneName"]))
 
             hml4 = (self.ip_network.max_prefixlen - self.ip_network.prefixlen) / 4
             mpl4 = self.ip_network.max_prefixlen / 4
@@ -168,6 +164,44 @@ class Prefix():
                 self.ip_network, len(self.forward_zone_re_components), ", ".join(self.forward_zone_re_components)))
             self.logger.debug("compiled forward lookup expression %s for prefix %s" % (forward_zone_re_base,
                                                                                        self.ip_network))
+            self.logger.info("forward zone %s for prefix %s: loaded serial %d" % (self.config["ForwardZoneName"],
+                                                                                  self.ip_network,
+                                                                                  self.soa_record.times[0]))
+
+        if not self.config["ForwardZoneEnabled"] and not self.config["ReverseZoneEnabled"]:
+            raise PrefixException("reverse neither forward zone is enabled")
+
+        self.static_entries = list()
+
+        if "StaticEntries" in self.config:
+            for sen, sed in self.config["StaticEntries"].items():
+                try:
+                    ent = dict()
+                    ent["Address"] = ipaddress.ip_address(unicode(sen))
+                    ent["ForwardLookup"] = True
+                    ent["ReverseLookup"] = True
+                    ent["RecordTTL"] = self.config["RecordTTL"]
+                    if type(sed) in (str, unicode):
+                        ent["Hostname"] = sed
+                        if not ent["Address"] in self.ip_network:
+                            raise ValueError("address out of prefix")
+                    elif type(sed) is dict:
+                        if not "Hostname" in sed:
+                            raise ValueError("hostname is required")
+                        ent["Hostname"] = sed["Hostname"]
+                        ent["RecordTTL"] = sed["RecordTTL"] if "RecordTTL" in sed else ent["RecordTTL"]
+                        ent["ForwardLookup"] = sed["ForwardLookup"] if "ForwardLookup" in sed else ent["ForwardLookup"]
+                        ent["ReverseLookup"] = sed["ReverseLookup"] if "ReverseLookup" in sed else ent["ReverseLookup"]
+                    else:
+                        raise ValueError("configuration incorrect")
+                    self.static_entries.append(ent)
+                    self.logger.debug("prefix %s added static entry %s <-> %s (fl: %d, rl: %d, rttl: %d)" % (
+                        self.ip_network, sen, ent["Hostname"], 1 if ent["ForwardLookup"] else 0,
+                        1 if ent["ReverseLookup"] else 0, ent["RecordTTL"]))
+                except ValueError as e:
+                    self.logger.warn("prefix %s not loading static entry %s due to error: %s" % (self.ip_network, sen,
+                                                                                                 e))
+            self.logger.info("prefix %s loaded %d static entries" % (self.ip_network, len(self.static_entries)))
         pass
 
     def forward_match(self, request_name):
@@ -228,22 +262,31 @@ class Prefix():
                                          rdata=ns_record))
             return records
         elif request_type == dnslib.QTYPE.AAAA:
-            recovered_data = self.forward_match(request_name)
+            static_entry = None
+            for se in self.static_entries:
+                if se["Hostname"] == request_name and se["ForwardLookup"]:
+                    static_entry = se
+                    break
 
-            if not recovered_data:
-                raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
-                                                                                          self.ip_network))
-
-            if "full_ip_address" in recovered_data:
-                a4_data = recovered_data["full_ip_address"]
+            record_ttl = self.config["RecordTTL"]
+            if static_entry is None:
+                recovered_data = self.forward_match(request_name)
+                if not recovered_data:
+                    raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
+                                                                                              self.ip_network))
+                if "full_ip_address" in recovered_data:
+                    a4_data = recovered_data["full_ip_address"]
+                else:
+                    raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
+                                                                                              self.ip_network))
             else:
-                raise RecordNotCoveredException("name %s does not belong to prefix %s" % (request_name,
-                                                                                          self.ip_network))
+                a4_data = static_entry["Address"]
+                record_ttl = static_entry["RecordTTL"]
 
             self.logger.debug("%s resolved to %s" % (request_name, a4_data))
             records = list()
             records.append(dnslib.RR(rname=request_name, rtype=dnslib.QTYPE.AAAA,
-                                     rclass=1, ttl=self.config["RecordTTL"],
+                                     rclass=1, ttl=record_ttl,
                                      rdata=dnslib.AAAA(unicode(a4_data))))
             return records
         else:
@@ -265,15 +308,26 @@ class Prefix():
                                          rdata=ns_record))
             return records
         elif request_type == dnslib.QTYPE.PTR:
-            remain_name = ip_address.exploded.replace(":", "")[self.ip_network.prefixlen / 4:]
-            full_name = ip_address.exploded.replace(":", "")
-            ptr_data = self.config["RecordPattern"]
-            ptr_data = ptr_data.replace("%r", remain_name)
-            ptr_data = ptr_data.replace("%f", full_name)
+            static_entry = None
+            for se in self.static_entries:
+                if se["Address"] == ip_address and se["ReverseLookup"]:
+                    static_entry = se
+                    break
+            record_ttl = self.config["RecordTTL"]
+            if static_entry is None:
+                remain_name = ip_address.exploded.replace(":", "")[self.ip_network.prefixlen / 4:]
+                full_name = ip_address.exploded.replace(":", "")
+                ptr_data = self.config["RecordPattern"]
+                ptr_data = ptr_data.replace("%r", remain_name)
+                ptr_data = ptr_data.replace("%f", full_name)
+            else:
+                ptr_data = static_entry["Hostname"]
+                record_ttl = static_entry["RecordTTL"]
+
             self.logger.debug("%s resolved to %s" % (ip_address, ptr_data))
             records = list()
             records.append(dnslib.RR(rname=request_name, rtype=dnslib.QTYPE.PTR,
-                                     rclass=1, ttl=self.config["RecordTTL"],
+                                     rclass=1, ttl=record_ttl,
                                      rdata=dnslib.PTR(ptr_data)))
             return records
         else:

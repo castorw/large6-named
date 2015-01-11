@@ -23,7 +23,16 @@
             },
             "NameServers": [
                 "ip6ns.example.com"
-            ]
+            ],
+            "StaticEntries": {
+                "fc00:ffff:ffff:acff::1": "gw.ipv6.example.com",
+                "fc00:ffff:ffff:acff::2": {
+                    "Hostname": "server.ipv6.example.com",
+                    "ForwardLookup": true,
+                    "ReverseLookup": false,
+                    "RecordTTL": 3600
+                }
+            }
         }
     }
 }

@@ -7,3 +7,6 @@ Problem faced with IPv6 networks is network segments with network mask of /64, w
 
 ### The Solution
 This domain name server implementation is not a standard record base domain name server. This system rather responds to queries dynamically. It's configuration is made specifically to cover network prefixes and creates the records dynamically.
+
+## More information
+Please visit wiki at <https://github.com/castorw/large6-named/wiki> to get more information.

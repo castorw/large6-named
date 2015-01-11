@@ -62,16 +62,16 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
                 for prefix in name_server.prefixes:
                     try:
                         if prefix.config["Version"] == 6:
-                            ns_result = prefix.reverse_resolve(ipv6_address, request_type)
+                            ns_result = prefix.reverse_resolve(request_name, ipv6_address, request_type)
                     except PrefixException:
                         continue
                     except AddressNotCoveredException:
                         continue
                 if ns_result is None:
                     raise RecordNotFoundException("no record found for %s" % request_name_uc)
+                reply.header.set_rcode(dnslib.RCODE.NOERROR)
                 for rr in ns_result:
                     reply.add_answer(rr)
-                reply.header.set_rcode(dnslib.RCODE.NOERROR)
                 handler_logger.info("%s got response with %d records for ipv6 %s request: %s" % (
                     self.client_address[0], len(ns_result), dnslib.QTYPE[request_type], request_name_uc))
             else:
@@ -132,13 +132,13 @@ class Prefix():
 
         pass
 
-    def reverse_resolve(self, ip_address, type):
+    def reverse_resolve(self, request_name, ip_address, type):
         if not self.config["ReverseZone"]:
             raise PrefixException("prefix %s does not provide reverse zone" % self.ip_network)
         if not ip_address in self.ip_network:
             raise AddressNotCoveredException("address %s is not within prefix %s" % (ip_address, self.ip_network))
+        records = list()
         if type == dnslib.QTYPE.SOA:
-            records = list()
             records.append(dnslib.RR(rname=self.reverse_zone_name, rtype=dnslib.QTYPE.SOA,
                                      rclass=1, ttl=self.config["RecordTTL"],
                                      rdata=self.soa_record))
@@ -153,11 +153,14 @@ class Prefix():
             ptr_data = self.config["RecordPattern"]
             ptr_data = ptr_data.replace("%r", remain_name)
             ptr_data = ptr_data.replace("%f", full_name)
+            self.logger.debug("%s resolved to %s" % (ip_address, ptr_data))
             records = list()
-            records.append(dnslib.RR(rname=ptr_data, rtype=dnslib.QTYPE.PTR, rclass=1, ttl=self.config["RecordTTL"],
+            records.append(dnslib.RR(rname=request_name, rtype=dnslib.QTYPE.PTR,
+                                     rclass=1, ttl=self.config["RecordTTL"],
                                      rdata=dnslib.PTR(ptr_data)))
             return records
-        raise PrefixException("unsupported record type %s" % dnslib.QTYPE[type])
+        else:
+            raise PrefixException("unsupported record type %s" % dnslib.QTYPE[type])
 
 
 class NameServer():

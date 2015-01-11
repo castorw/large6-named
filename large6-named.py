@@ -95,10 +95,10 @@ class UdpDnsRequestHandler(SocketServer.BaseRequestHandler):
                 handler_logger.info("%s got response with %d records for %s request: %s" % (
                     self.client_address[0], len(ns_result), dnslib.QTYPE[request_type], request_name_uc))
         except RecordNotFoundException as e:
-            handler_logger.info("%s %s" % (self.client_address[0], e.message))
+            handler_logger.info("%s %s" % (self.client_address[0], e))
             reply.header.set_rcode(dnslib.RCODE.NXDOMAIN)
         except HandlingException as e:
-            handler_logger.info("%s %s" % (self.client_address[0], e.message))
+            handler_logger.info("%s %s" % (self.client_address[0], e))
             reply.header.set_rcode(dnslib.RCODE.SERVFAIL)
 
         self.send_data(reply.pack())
@@ -116,7 +116,10 @@ class Prefix():
 
         if self.config["Version"] != 6:
             raise PrefixException("only ipv6 prefixes are currently supported")
-        self.ip_network = ipaddress.ip_network(prefix)
+        try:
+            self.ip_network = ipaddress.ip_network(prefix)
+        except ValueError as e:
+            raise PrefixException("invalid prefix %s: %s" % (prefix, e))
 
         if self.config["ReverseZoneEnabled"]:
             zn_rev = self.ip_network.network_address.exploded.replace(":", "")[:self.ip_network.prefixlen / 4][::-1]
@@ -146,6 +149,11 @@ class Prefix():
                                                                                   self.soa_record.times[0]))
 
         if self.config["ForwardZoneEnabled"]:
+            if not self.config["RecordPattern"].endswith(self.config["ForwardZoneName"]):
+                raise PrefixException("record pattern %s for prefix %s does not end with its forward zone name %s" % (
+                    self.config["RecordPattern"], self.ip_network, self.config["ForwardZoneName"]
+                                                                                                                     ))
+
             hml4 = (self.ip_network.max_prefixlen - self.ip_network.prefixlen) / 4
             mpl4 = self.ip_network.max_prefixlen / 4
             forward_zone_re_base = self.config["RecordPattern"]
@@ -309,7 +317,11 @@ class NameServer():
 
         self.prefixes = list()
         for prefix, prefix_config in self.config["Prefixes"].items():
-            self.prefixes.append(Prefix(prefix, prefix_config))
+            try:
+                pfx_instance = Prefix(prefix, prefix_config)
+                self.prefixes.append(pfx_instance)
+            except PrefixException as e:
+                self.logger.warn("not loading prefix %s due to error: %s" % (prefix, e))
 
         pass
 

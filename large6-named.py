@@ -221,6 +221,12 @@ class Prefix():
                                          rclass=1, ttl=self.config["RecordTTL"],
                                          rdata=ns_record))
             return records
+        elif request_type == dnslib.QTYPE.NS:
+            for ns_record in self.ns_records:
+                records.append(dnslib.RR(rname=self.config["ForwardZoneName"], rtype=dnslib.QTYPE.NS,
+                                         rclass=1, ttl=self.config["RecordTTL"],
+                                         rdata=ns_record))
+            return records
         elif request_type == dnslib.QTYPE.AAAA:
             recovered_data = self.forward_match(request_name)
 

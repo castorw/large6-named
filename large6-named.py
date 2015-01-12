@@ -115,8 +115,8 @@ class Prefix():
             raise PrefixException("only ipv6 prefixes are currently supported")
         try:
             self.ip_network = ipaddress.ip_network(prefix)
-        except ValueError as ent:
-            raise PrefixException("invalid prefix %s: %s" % (prefix, ent))
+        except ValueError as e:
+            raise PrefixException("invalid prefix %s: %s" % (prefix, e))
 
         if self.config["ReverseZoneEnabled"]:
             zn_rev = self.ip_network.network_address.exploded.replace(":", "")[:self.ip_network.prefixlen / 4][::-1]
